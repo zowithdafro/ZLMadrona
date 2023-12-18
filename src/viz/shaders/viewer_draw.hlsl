@@ -16,6 +16,14 @@ StructuredBuffer<DrawData> drawDataBuffer;
 [[vk::binding(3, 0)]]
 StructuredBuffer<ShadowViewData> shadowViewDataBuffer;
 
+[[vk::binding(4, 0)]]
+cbuffer TimeBuffer : register(b4) {
+    float time;
+};
+
+
+
+
 // Asset descriptor bindings
 [[vk::binding(0, 1)]]
 StructuredBuffer<PackedVertex> vertexDataBuffer;
@@ -153,6 +161,59 @@ void computeCompositeTransform(float3 obj_t,
     to_view_rotation = normalize(composeQuats(cam_r_inv, obj_r));
 }
 
+float hash(float3 p) {
+    p*=.02;
+    p = frac(p * 0.3183099 + float3(1.0, 17.0, 113.0));
+    p *= dot(p, p + 19.19);
+    return frac(p.x + p.y + p.z);
+}/*
+float hash(float3 p) {
+    // Simple gradient noise function
+    float3 i = floor(p);
+    float3 f = frac(p);
+
+    // Smooth interpolation curve
+    f = f * f * (3.0 - 2.0 * f);
+
+    // Hash function for corners of the cube
+    float n = dot(i, float3(1.0, 57.0, 113.0));
+
+    // Random gradients
+    float3 g000 = frac(sin(float3(n, n + 1.0, n + 2.0)) * 43758.5453);
+    float3 g001 = frac(sin(float3(n + 3.0, n + 4.0, n + 5.0)) * 43758.5453);
+    float3 g010 = frac(sin(float3(n + 6.0, n + 7.0, n + 8.0)) * 43758.5453);
+    float3 g011 = frac(sin(float3(n + 9.0, n + 10.0, n + 11.0)) * 43758.5453);
+    float3 g100 = frac(sin(float3(n + 12.0, n + 13.0, n + 14.0)) * 43758.5453);
+    float3 g101 = frac(sin(float3(n + 15.0, n + 16.0, n + 17.0)) * 43758.5453);
+    float3 g110 = frac(sin(float3(n + 18.0, n + 19.0, n + 20.0)) * 43758.5453);
+    float3 g111 = frac(sin(float3(n + 21.0, n + 22.0, n + 23.0)) * 43758.5453);
+
+    // Interpolate gradients
+    float n000 = dot(g000, f);
+    float n100 = dot(g100, f - float3(1.0, 0.0, 0.0));
+    float n010 = dot(g010, f - float3(0.0, 1.0, 0.0));
+    float n110 = dot(g110, f - float3(1.0, 1.0, 0.0));
+    float n001 = dot(g001, f - float3(0.0, 0.0, 1.0));
+    float n101 = dot(g101, f - float3(1.0, 0.0, 1.0));
+    float n011 = dot(g011, f - float3(0.0, 1.0, 1.0));
+    float n111 = dot(g111, f - float3(1.0, 1.0, 1.0));
+
+    // Linear interpolation manually
+    float nx00 = n000 + f.x * (n100 - n000);
+    float nx01 = n001 + f.x * (n101 - n001);
+    float nx10 = n010 + f.x * (n110 - n010);
+    float nx11 = n011 + f.x * (n111 - n011);
+
+    float nxy0 = nx00 + f.y * (nx10 - nx00);
+    float nxy1 = nx01 + f.y * (nx11 - nx01);
+
+    float nxyz = nxy0 + f.z * (nxy1 - nxy0);
+
+    return nxyz;
+}*/
+
+
+
 [shader("vertex")]
 float4 vert(in uint vid : SV_VertexID,
             in uint draw_id : SV_InstanceID,
@@ -161,7 +222,58 @@ float4 vert(in uint vid : SV_VertexID,
     DrawData draw_data = drawDataBuffer[draw_id];
 
     Vertex vert = unpackVertex(vertexDataBuffer[vid]);
-    float4 color = materialBuffer[draw_data.materialID].color;
+
+    if (draw_data.materialID == 7) {
+        
+        float topZ = 1.0; // The Z value of the cube's top edge in its local space
+        float edgeThreshold = 0.01; // A small threshold to identify the top face vertices
+        /*float waveAmplitude = 1.0; // The height of the wave
+        float waveFrequency = 0.5; // The frequency of the wave
+
+        // Check if the vertex is part of the top face
+        if (abs(vert.position.z - topZ) < edgeThreshold) {
+            // Determine the phase shift based on the x-coordinate
+            float phaseShift = (vert.position.x > 0) ? time : -time;
+
+            // Apply the wave transformation
+            vert.position.z += waveAmplitude * sin(vert.position.x + phaseShift * waveFrequency * 3.14159 * 2.0);
+        }*/
+        float waveAmplitude = 1.0; // The height of the wave
+        float waveFrequency = 10.0; // The frequency of the wave
+        float waveSpeed = 1.0; // Speed at which the wave propagates
+
+        // Check if the vertex is part of the top edge
+        if (abs(vert.position.z - topZ) < edgeThreshold) {
+            // Calculate the phase based on the vertex's position along the edge and time
+            // This will make the wave move along the edge over time
+            float phase = vert.position.x * waveFrequency + time * waveSpeed;
+
+            // Apply the wave transformation
+            // The sine function will make the vertex move up and down, creating a wave effect
+            vert.position.z += waveAmplitude * sin(phase * 3.14159 * 2.0);
+        }
+        float3 positionFactor = vert.position * 0.5 + 0.5; // Normalize position to 0-1 range
+
+        // Use the original hash function
+        float noiseValue = hash(vert.position * 1.0);
+
+        // Map the noise value to a full color spectrum from red to yellow
+        float4 colorA = float4(1.0, 0.0, 0.0, 1.0); // Red
+        float4 colorB = float4(1.0, 0.1, 0.0, 1.0); // Yellow
+        // Introduce flowy motion by offsetting the time for each vertex
+        float offsetTime = time + positionFactor.x * 0.5; // Adjust the factor to control the flow speed
+        float flowyMotion = 1.0 * sin(offsetTime * .5 * 3.14159 * 2.0);
+
+        // Apply the flowy motion to the color
+        noiseValue = saturate(noiseValue);
+        
+        float4 finalColor = lerp(colorA, colorB, smoothstep(0.0, 1.0, noiseValue)) + float4(flowyMotion, flowyMotion * 0.1, flowyMotion*.005, 0.0);
+        v2f.color = finalColor;
+        
+    } else {
+        v2f.color = materialBuffer[draw_data.materialID].color;
+    }
+    
     uint instance_id = draw_data.instanceID;
 
     PerspectiveCameraData view_data =
@@ -194,14 +306,13 @@ float4 vert(in uint vid : SV_VertexID,
     v2f.normal = normalize(
         rotateVec(instance_data.rotation, (vert.normal / instance_data.scale)));
     v2f.uv = vert.uv;
-    v2f.color = color;
+    v2f.color = v2f.color;
     v2f.position = rotateVec(instance_data.rotation,
                              instance_data.scale * vert.position) + instance_data.position;
     v2f.dummy = shadowViewDataBuffer[0].viewProjectionMatrix[0][0];
     v2f.texIdx = materialBuffer[draw_data.materialID].textureIdx;
     v2f.roughness = materialBuffer[draw_data.materialID].roughness;
     v2f.metalness = materialBuffer[draw_data.materialID].metalness;
-
     return clip_pos;
 }
 

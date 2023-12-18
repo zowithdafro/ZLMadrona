@@ -270,6 +270,16 @@ public:
     void waitForIdle();
 
     const VizECSBridge * getBridgePtr() const;
+   /* void startFrame() {
+        ImGui_ImplVulkan_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        float currentTime = getTimeInSeconds();
+        updateUniformBuffer(currentTime); // Call the member function
+    }*/
+    void updateUniformBuffer(VkDevice dev, VkDeviceMemory timeBufferMemory, float currentTime);// Unmap the memory after writing
+    
+
+
 
 private:
     render::vk::Backend::LoaderLib loader_lib_;
@@ -281,6 +291,13 @@ public:
     render::vk::MemoryAllocator alloc;
 
 private:
+    VkBuffer timeBuffer_;
+    VkDeviceMemory timeBufferMemory_;
+    VkDescriptorSetLayout timeBufferLayout_;
+    VkDescriptorSet timeBufferDescriptorSet_;
+    madrona::render::vk::InstanceDispatch instanceDispatch_;
+    
+    
     VkQueue render_queue_;
 
     // Fixme remove
@@ -332,8 +349,12 @@ private:
 
     DynArray<MaterialTexture> material_textures_;
     VoxelConfig voxel_config_;
+    
+    void createTimeBuffer();
+    void createTimeBufferDescriptorSet();
 
     std::unique_ptr<render::vk::HostBuffer> screenshot_buffer_;
+    
 };
 
 }

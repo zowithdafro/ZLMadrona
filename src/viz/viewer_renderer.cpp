@@ -1,5 +1,5 @@
 #include "viewer_renderer.hpp"
-
+#include <chrono>
 #include <madrona/render/shader_compiler.hpp>
 
 #include "backends/imgui_impl_vulkan.h"
@@ -8,6 +8,8 @@
 #include "../render/asset_utils.hpp"
 
 #include "vk/descriptors.hpp"
+#include <iostream>
+#include <stdexcept>
 
 #include <filesystem>
 
@@ -33,6 +35,51 @@ using namespace std;
 
 using namespace madrona::render;
 using namespace madrona::render::vk;
+/*
+uint32_t findMemoryType(InstanceDispatch& instanceDispatch, VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties2 memProperties;
+    instanceDispatch.getPhysicalDeviceMemoryProperties2(physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    std::cout << "Failed to find suitable memory type!" << std::endl;
+}*/
+
+/*uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    std::cout << "failed to find suitable memory type!" << std::endl;
+}*/
+uint32_t findMemoryType(madrona::render::vk::InstanceDispatch& instanceDispatch, VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties2 memProperties2{};
+    memProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+
+    // Use the member function of the InstanceDispatch object
+    instanceDispatch.getPhysicalDeviceMemoryProperties2(physicalDevice, &memProperties2);
+
+    auto& memProperties = memProperties2.memoryProperties;
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+
+    std::cout << "failed to find suitable memory type!" << std::endl;
+}
+
+
+
+
 
 namespace madrona::viz {
 
@@ -74,6 +121,7 @@ struct ImGUIVkLookupData {
     VkDevice dev;
     PFN_vkGetInstanceProcAddr getInstAddr;
     VkInstance inst;
+    
 };
 
 Backend::LoaderLib PresentationState::init()
@@ -990,6 +1038,7 @@ static void initCommonDrawPipelineInfo(VkPipelineVertexInputStateCreateInfo &ver
     raster_info.lineWidth = 1.0f;
 }
 
+
 static Pipeline<1> makeDrawPipeline(const Device &dev,
                                     VkPipelineCache pipeline_cache,
                                     VkRenderPass render_pass,
@@ -1080,6 +1129,7 @@ static Pipeline<1> makeDrawPipeline(const Device &dev,
     VkPipelineLayout draw_layout;
     REQ_VK(dev.dt.createPipelineLayout(dev.hdl, &gfx_layout_info, nullptr,
                                        &draw_layout));
+    
 
     array<VkPipelineShaderStageCreateInfo, 2> gfx_stages {{
         {
@@ -2369,6 +2419,7 @@ static ImGuiRenderState imguiInit(GLFWwindow *window, const Device &dev,
         REQ_VK(dev.dt.createDescriptorPool(dev.hdl,
             &pool_info, nullptr, &desc_pool));
     }
+    
 
     ImGui_ImplVulkan_InitInfo vk_init = {};
     vk_init.Instance = backend.hdl;
@@ -2427,7 +2478,7 @@ static ImGuiRenderState imguiInit(GLFWwindow *window, const Device &dev,
         desc_pool,
         imgui_renderpass,
     };
-}
+}//zoe lynch
 
 static EngineInterop setupEngineInterop(Device &dev,
                                         MemoryAllocator &alloc,
@@ -2966,6 +3017,145 @@ static Sky loadSky(const vk::Device &dev, MemoryAllocator &alloc, VkQueue queue)
         20.0f
     };
 }
+//zoe lynch
+void Renderer::createTimeBuffer() {
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = sizeof(float); // Assuming you are storing a single float for time
+    bufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (dev.dt.createBuffer(dev.hdl, &bufferInfo, nullptr, &timeBuffer_) != VK_SUCCESS) {//.device(), &bufferInfo, nullptr, &timeBuffer_) != VK_SUCCESS) {
+        std::cout << "failed to create time buffer!" << std::endl;
+        //throw std::runtime_error("failed to create time buffer!");
+    }
+
+    VkMemoryRequirements memRequirements;
+    dev.dt.getBufferMemoryRequirements(dev.hdl, timeBuffer_, &memRequirements);//.device(), timeBuffer_, &memRequirements);
+    
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    //allocInfo.memoryTypeIndex = findMemoryType(dev.hdl, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    allocInfo.memoryTypeIndex = findMemoryType(instanceDispatch_,dev.phy, memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+
+    if (dev.dt.allocateMemory(dev.hdl, &allocInfo, nullptr, &timeBufferMemory_) != VK_SUCCESS) {
+        std::cout << "failed to allocate time buffer memory!" << std::endl;
+        //throw std::runtime_error("failed to allocate time buffer memory!");
+    }
+
+    dev.dt.bindBufferMemory(dev.hdl, timeBuffer_, timeBufferMemory_, 0);
+}
+
+void Renderer::createTimeBufferDescriptorSet() {
+    // Create the descriptor set layout
+    VkDescriptorSetLayoutBinding timeLayoutBinding{};
+    timeLayoutBinding.binding = 0;
+    timeLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    timeLayoutBinding.descriptorCount = 1;
+    timeLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &timeLayoutBinding;
+
+    if (dev.dt.createDescriptorSetLayout(dev.hdl, &layoutInfo, nullptr, &timeBufferLayout_) != VK_SUCCESS) {
+        std::cout <<"failed to create time buffer descriptor set layout!" << std::endl;
+    }
+    
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSize.descriptorCount = 1; // Adjust based on how many descriptors you need
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    poolInfo.maxSets = 1; // The maximum number of descriptor sets that can be allocated from the pool
+    VkDescriptorPool descriptorPool;
+    if (dev.dt.createDescriptorPool(dev.hdl, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+        std::cout <<"failed to create descriptor pool!" << std::endl;
+    }
+
+
+    // Allocate the descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &timeBufferLayout_;
+
+    if (dev.dt.allocateDescriptorSets(dev.hdl, &allocInfo, &timeBufferDescriptorSet_) != VK_SUCCESS) {
+        std::cout << "failed to allocate time buffer descriptor set!"<< std::endl;
+    }
+
+    // Update the descriptor set
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = timeBuffer_;
+    bufferInfo.offset = 0;
+    bufferInfo.range = sizeof(float);
+
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet = timeBufferDescriptorSet_;
+    descriptorWrite.dstBinding = 0;
+    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptorWrite.descriptorCount = 1;
+    descriptorWrite.pBufferInfo = &bufferInfo;
+
+    dev.dt.updateDescriptorSets(dev.hdl, 1, &descriptorWrite, 0, nullptr);
+}
+
+
+/*
+void createBuffer(madrona::render::vk::Device& dev, VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory, ImGUIVkLookupData* user_data) {
+    std::cout << "Entering createBuffer" << std::endl;
+    
+    // Create buffer
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (dev.dt.createBuffer(dev.hdl, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+        std::cout << "Failed to create buffer!" << std::endl;
+    }
+    std::cout << "Buffer created successfully" << std::endl;
+
+    // Get memory requirements
+    VkMemoryRequirements memRequirements;
+    dev.dt.getBufferMemoryRequirements(dev.hdl, buffer, &memRequirements);
+
+    // Cast the user_data to the appropriate type
+    if (!user_data) {
+        std::cout << "user_data is nullptr!" << std::endl;
+    }
+
+    InstanceDispatch instanceDispatch(user_data->inst, user_data->getInstAddr, true);
+
+    // Allocate memory
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = findMemoryType(instanceDispatch, dev.phy, memRequirements.memoryTypeBits, properties);
+
+    if (dev.dt.allocateMemory(dev.hdl, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        std::cout << "Failed to allocate buffer memory!" << std::endl;
+    }
+    std::cout << "Memory allocated successfully" << std::endl;
+
+    // Bind buffer memory
+    if (dev.dt.bindBufferMemory(dev.hdl, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        std::cout << "Failed to bind buffer memory!" << std::endl;
+    }
+    std::cout << "Exiting createBuffer" << std::endl;
+}*/
+
+
+
 
 Renderer::Renderer(uint32_t gpu_id,
                    uint32_t img_width,
@@ -3047,7 +3237,8 @@ Renderer::Renderer(uint32_t gpu_id,
       sky_(loadSky(dev, alloc, render_queue_)),
       material_textures_(0),
       voxel_config_(voxel_config),
-      screenshot_buffer_()
+      screenshot_buffer_(),
+    instanceDispatch_(backend.hdl, backend.dt.getInstanceProcAddr, true)
 {
     for (int i = 0; i < (int)frames_.size(); i++) {
         makeFrame(dev, alloc, fb_width_, fb_height_,
@@ -3066,6 +3257,20 @@ Renderer::Renderer(uint32_t gpu_id,
                   sky_,
                   &frames_[i]);
     }
+    
+    //zoelynch 1
+    /*ImGUIVkLookupData lookup_data1 {
+        dev.dt.getDeviceProcAddr,
+        dev.hdl,
+        backend.dt.getInstanceProcAddr,
+        backend.hdl,
+    };
+    createBuffer(dev, sizeof(float),
+                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                 timeBuffer_, timeBufferMemory_, &lookup_data1); // Pass user_data as the last argument*/
+    createTimeBuffer();
+    createTimeBufferDescriptorSet();
 
     screenshot_buffer_ = std::make_unique<render::vk::HostBuffer>(alloc.makeStagingBuffer(frames_[0].fb.colorAttachment.reqs.size));
 }
@@ -3076,6 +3281,8 @@ Renderer::~Renderer()
     ImGui_ImplGlfw_Shutdown();
 
     loaded_assets_.clear();
+    //dev.dt.destroyDescriptorPool(dev.hdl, descriptorPool, nullptr);
+
 
     for (Frame &f : frames_) {
         dev.dt.destroySemaphore(dev.hdl, f.swapchainReady, nullptr);
@@ -3585,12 +3792,53 @@ void Renderer::waitUntilFrameReady()
     REQ_VK(dev.dt.waitForFences(dev.hdl, 1, &frame.cpuFinished, VK_TRUE,
                                 UINT64_MAX));
 }
+//zl implement zoe lynch implement zoe lynch 5
+float getTimeInSeconds() {
+    static auto startTime = std::chrono::high_resolution_clock::now(); // Static variable to store start time
+
+    auto currentTime = std::chrono::high_resolution_clock::now(); // Get the current time point
+
+    // Calculate the duration since the start time in seconds
+    std::chrono::duration<float> elapsed = currentTime - startTime;
+    float seconds = elapsed.count();
+
+    return seconds;
+}
+
 
 void Renderer::startFrame()
 {
+    // Extract the VkDevice from the render::vk::Device
+    
+    float currentTime = getTimeInSeconds();
+    std::cout << "Current Time: " << currentTime << std::endl;
+    
+    // Pass the extracted VkDevice to updateUniformBuffer
+    updateUniformBuffer(dev.hdl, timeBufferMemory_, currentTime);
+    std::cout << "Exiting startFrame" << std::endl;
+    
+    std::cout << "Entering startFrame" << std::endl;
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+    
+    
 }
+
+void Renderer::updateUniformBuffer(VkDevice dev1, VkDeviceMemory timeBufferMemory, float currentTime)
+{
+    std::cout << "Entering updateUniformBuffer" << std::endl;
+    void* data;
+    VkResult result = dev.dt.mapMemory(dev1, timeBufferMemory, 0, sizeof(float), 0, &data);
+    if (result != VK_SUCCESS) {
+        std::cerr << "Failed to map memory: " << result << std::endl;
+        return;
+    }
+    
+    memcpy(data, &currentTime, sizeof(float));
+    dev.dt.unmapMemory(dev1, timeBufferMemory);
+    std::cout << "Exiting updateUniformBuffer" << std::endl;
+}
+
 
 static void packView(const Device &dev,
                      HostBuffer &view_staging_buffer,
@@ -4108,6 +4356,8 @@ void Renderer::render(const ViewerCam &cam,
     dev.dt.cmdCopyBuffer(draw_cmd, frame.viewStaging.buffer,
                          frame.renderInput.buffer,
                          1, &view_copy);
+    
+    /*dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &timeBufferDescriptorSet, 0, nullptr);*/
 
     packLighting(dev, frame.lightStaging, lights_);
     VkBufferCopy light_copy {
@@ -4155,6 +4405,7 @@ void Renderer::render(const ViewerCam &cam,
                    cfg.viewIDX, engine_interop_.maxViewsPerWorld);
 
     const uint32_t num_voxels = this->voxel_config_.xLength * this->voxel_config_.yLength * this->voxel_config_.zLength;
+    
 
     if (num_voxels > 0) {
         dev.dt.cmdFillBuffer(draw_cmd, frame.voxelVBO.buffer,
@@ -4173,6 +4424,8 @@ void Renderer::render(const ViewerCam &cam,
 
         issueVoxelGen(dev, frame, voxel_mesh_gen_, draw_cmd, cfg.viewIDX, engine_interop_.maxInstancesPerWorld, voxel_config_);
     }
+    
+    
 
     uint32_t num_instances =
         engine_interop_.bridge.numInstances[cfg.worldIDX];
@@ -4219,6 +4472,7 @@ void Renderer::render(const ViewerCam &cam,
             frame.cullShaderSet,
             asset_set_cull_,
         };
+        
 
         dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                                      instance_cull_.layout, 0,
@@ -4275,6 +4529,8 @@ void Renderer::render(const ViewerCam &cam,
     { // Shadow pass
         dev.dt.cmdBindPipeline(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 object_shadow_draw_.hdls[0]);
+        dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, object_shadow_draw_.layout, 0, 1, &timeBufferDescriptorSet_, 0, nullptr);
+
 
         std::array draw_descriptors {
             frame.drawShaderSet,
@@ -4299,6 +4555,7 @@ void Renderer::render(const ViewerCam &cam,
         dev.dt.cmdBindIndexBuffer(draw_cmd, loaded_assets_[0].buf.buffer,
                 loaded_assets_[0].idxBufferOffset,
                 VK_INDEX_TYPE_UINT32);
+        /*dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &timeBufferDescriptorSet, 0, nullptr);*/
 
         VkViewport viewport {
             0,
@@ -4375,6 +4632,8 @@ void Renderer::render(const ViewerCam &cam,
 
     dev.dt.cmdBindPipeline(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            object_draw_.hdls[0]);
+    dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, object_draw_.layout, 0, 1, &timeBufferDescriptorSet_, 0, nullptr);
+
 
     std::array draw_descriptors {
         frame.drawShaderSet,
@@ -4387,6 +4646,14 @@ void Renderer::render(const ViewerCam &cam,
                                  draw_descriptors.size(),
                                  draw_descriptors.data(),
                                  0, nullptr);
+    
+    /*dev.dt.cmdBindDescriptorSets(draw_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                     pipelineLayout, // Use the layout here
+                                     0,
+                                     1,
+                                     &timeBufferDescriptorSet,
+                                     0, nullptr);*/
+    
 
     DrawPushConst draw_const {
         (uint32_t)cfg.viewIDX,
