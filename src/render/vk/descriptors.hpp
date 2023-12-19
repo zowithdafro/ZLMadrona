@@ -112,8 +112,7 @@ public:
     static inline void storageImage(VkWriteDescriptorSet &update,
                                     VkDescriptorSet desc_set,
                                     const VkDescriptorImageInfo *img,
-                                    uint32_t binding,
-                                    uint32_t arr_offset = 0);
+                                    uint32_t binding);
 
     static inline void accelStructs(
         VkWriteDescriptorSet &update,

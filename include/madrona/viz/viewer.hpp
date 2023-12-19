@@ -1,32 +1,77 @@
 #pragma once
 
+#include <madrona/types.hpp>
+#include <madrona/render/mw.hpp>
 #include <madrona/importer.hpp>
-#include <madrona/render/api.hpp>
-#include <madrona/render/render_mgr.hpp>
-#include <madrona/window.hpp>
-
+#include <madrona/exec_mode.hpp>
 #include <memory>
+
+#include <madrona/viz/system.hpp>
 
 namespace madrona::viz {
 
-// The viewer app simply provides UI overlay over the rendering output
-// of the render context and presents the whole rendering output
-// to the screen.
+struct LightConfig {
+    bool isDirectional;
+
+    // Used for direction or position depending on value of isDirectional
+    math::Vector3 dir;
+    math::Vector3 color;
+};
+
+struct VoxelConfig {
+    uint32_t xLength;
+    uint32_t yLength;
+    uint32_t zLength;
+};
+
 class Viewer {
 public:
     struct Config {
+        int gpuID;
+        uint32_t renderWidth;
+        uint32_t renderHeight;
         uint32_t numWorlds;
-        uint32_t simTickRate;
-        // Initial camera position
+        uint32_t maxViewsPerWorld;
+        uint32_t maxInstancesPerWorld;
+        uint32_t defaultSimTickRate;
         float cameraMoveSpeed;
         math::Vector3 cameraPosition;
         math::Quat cameraRotation;
+        ExecMode execMode;
+        uint32_t xLength = 0;
+        uint32_t yLength = 0;
+        uint32_t zLength = 0;
     };
 
     enum class KeyboardKey : uint32_t {
-        W, A, S, D, Q, E, R, X, Z, C, G, L, T, F, M,
-        K1, K2, K3, K4, K5, K6, K7, K8, K9, K0,
-        Shift, Space, NumKeys,
+        W,
+        A,
+        S,
+        D,
+        Q,
+        E,
+        R,
+        X,
+        Z,
+        C,
+        G,
+        L,
+        T,
+        F,
+        M,
+        K1,
+        K2,
+        K3,
+        K4,
+        K5,
+        K6,
+        K7,
+        K8,
+        K9,
+        K0,
+        Shift,
+        Space,
+        NumKeys,
     };
 
     class UserInput {
@@ -41,40 +86,31 @@ public:
         bool *press_state_;
     };
 
-    Viewer(const render::RenderManager &render_mgr,
-           const Window *window,
-           const Config &cfg);
-    Viewer(Viewer &&);
+    Viewer(const Config &cfg);
+    Viewer(Viewer &&o);
+
     ~Viewer();
 
-    // Viewer app can also load objects (this would be used if the
-    // batch renderer isn't used).
     CountT loadObjects(Span<const imp::SourceObject> objs,
                        Span<const imp::SourceMaterial> mats,
                        Span<const imp::SourceTexture> textures);
 
-    void configureLighting(Span<const render::LightConfig> lights);
+    void configureLighting(Span<const LightConfig> lights);
 
-    // Run the viewer
-    template <typename WorldInputFn, typename AgentInputFn,
-              typename StepFn, typename UIFn>
-    void loop(WorldInputFn &&world_input_fn, AgentInputFn &&agent_input_fn,
-              StepFn &&step_fn, UIFn &&ui_fn);
+    const VizECSBridge * rendererBridge() const;
+
+    template <typename InputFn, typename StepFn, typename UIFn>
+    void loop(InputFn &&input_fn, StepFn &&step_fn, UIFn &&ui_fn);
+
+    CountT getRenderedWorldID();
+    CountT getRenderedViewID();
 
     void stopLoop();
 
-    CountT getCurrentWorldID() const;
-    CountT getCurrentViewID() const;
-    CountT getCurrentControlID() const;
-
 private:
-    void loop(
-        void (*world_input_fn)(void *, CountT, const UserInput &),
-        void *world_input_data,
-        void (*agent_input_fn)(void *, CountT, CountT, const UserInput &),
-        void *agent_input_data,
-        void (*step_fn)(void *), void *step_data,
-        void (*ui_fn)(void *), void *ui_data);
+    void loop(void (*input_fn)(void *, CountT, CountT, const UserInput &),
+              void *input_data, void (*step_fn)(void *), void *step_data,
+              void (*ui_fn)(void *), void *ui_data);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <madrona/mw_gpu/host_print.hpp>
 #include <madrona/taskgraph.hpp>
 #include <madrona/mw_gpu/megakernel_consts.hpp>
 
@@ -865,7 +866,7 @@ struct SortArchetypeNodeBase::RadixSortOnesweepCustom {
         CTA_SYNC();
         ScatterKeysGlobal();
 
-        // scatter values if necessaryRadixSortOnesweepCustom
+        // scatter values if necessary
         GatherScatterValues(ranks);
     }
 
@@ -1208,84 +1209,46 @@ void SortArchetypeNodeBase::resizeTable(int32_t invocation_idx)
 {
     int32_t numEntities = bins[(numPasses - 1) * 256 + 255];
     mwGPU::getStateManager()->resizeArchetype(archetypeID, numEntities);
-
-    // Set for clearWorldOffsetsAndCounts
-    numDynamicInvocations = mwGPU::GPUImplConsts::get().numWorlds;
-}
-
-void SortArchetypeNodeBase::clearWorldOffsetsAndCounts(int32_t invocation_idx) {
-    int32_t numEntities = bins[(numPasses - 1) * 256 + 255];
-
-    // The counts computation for worldID i works by setting:
-    // worldOffsets[i] = entities before world i;
-    // worldCounts[i] = entities before and including world i;
-    // And then element-wise subtracting worldOffsets from worldCounts.
-
-    // A world with 0 entities will not be written to in either array, 
-    // so we ensure counts are correct for those worlds by clearing
-    // worldOffsets and worldCounts to the same value.
-
-    // Clear to numEntities in case some number of final worlds
-    // have 0 elements (see computeWorldCounts(int32_t invocation_idx)).
-    worldOffsets[invocation_idx] = numEntities;
-    worldCounts[invocation_idx] = numEntities;
     
-    if (invocation_idx == 0) {
-        // Set for copyKeys and computeWorldCounts
-        numDynamicInvocations = numEntities;
-    }
+    numDynamicInvocations = numEntities;
 }
-
 
 void SortArchetypeNodeBase::copyKeys(int32_t invocation_idx)
 {
     keysCol[invocation_idx] = keysAlt[invocation_idx];
+}
+
+void SortArchetypeNodeBase::computeWorldOffsets(int32_t invocation_idx)
+{
+    if (invocation_idx == 0 ||
+        keysCol[invocation_idx - 1] != keysCol[invocation_idx]) {
+        worldOffsets[keysCol[invocation_idx]] = invocation_idx;
+    }
     
+    if (invocation_idx == 0) {
+        numDynamicInvocations = mwGPU::GPUImplConsts::get().numWorlds;
+    }
 }
 
 void SortArchetypeNodeBase::computeWorldCounts(int32_t invocation_idx)
 {
-    if (invocation_idx == 0)
-    {
-        // The offset of the first entity's world must be 0.
-        worldOffsets[keysCol[invocation_idx]] = invocation_idx;
-        numDynamicInvocations = mwGPU::GPUImplConsts::get().numWorlds;
-    }
-    else if (keysCol[invocation_idx] != keysCol[invocation_idx - 1])
-    {
-        // This thread is the index of the first entity in 
-        // World "keysCol[invocation_idx]". Its index value is both
-        // 1. The offset for its world
-        // 2. The total number of entities occuring before it.
-        // We write both those cases below.
 
+    int32_t numEntities = bins[(numPasses - 1) * 256 + 255];
 
-        // World "keysCol[invocation_idx]" has invocation_idx entities 
-        // before it in the sorted list.
-        worldOffsets[keysCol[invocation_idx]] = invocation_idx;
-        
-        // World "keysCol[invocation_idx - 1]" has invocation_idx entities
-        // total including entities before it and its entities.
-        // For the final world with entities, invocation_idx = numEntities
-        // should write to worldCounts, but our final thread index is
-        // numEntities - 1. Thus, we initialize to numEntities so the value
-        // of worldCounts is correct (see clearWorldOffsetsAndCounts()).
-        worldCounts[keysCol[invocation_idx - 1]] = invocation_idx;
-    }
-}
-
-void SortArchetypeNodeBase::correctWorldCounts(int32_t invocation_idx) {
-    // Correct world counts by subtracting "entities before" from "entities
-    // before and including" for each world. A world with 0 entities will
-    // compute numEntities - numEntities = 0. For worlds with 0 entities,
-    // worldOffsets = numEntities. Otherwise, worldOffsets are correct.
-    worldCounts[invocation_idx] -= worldOffsets[invocation_idx];
-
-    if (invocation_idx == 0)
-    {
-        int32_t numEntities = bins[(numPasses - 1) * 256 + 255];
+    if (invocation_idx == 0) {
         numDynamicInvocations = numEntities;
     }
+
+    if (invocation_idx == mwGPU::GPUImplConsts::get().numWorlds - 1) {
+        worldCounts[invocation_idx] = 
+            numEntities - worldOffsets[invocation_idx];
+        return;
+    }
+
+    worldCounts[invocation_idx] = 
+        worldOffsets[invocation_idx + 1] - worldOffsets[invocation_idx];
+
+
 }
 
 void SortArchetypeNodeBase::RearrangeNode::stageColumn(int32_t invocation_idx)
@@ -1421,24 +1384,19 @@ TaskGraph::NodeID SortArchetypeNodeBase::addToGraph(
     if (world_sort) {
         cur_task = builder.addNodeFn<&SortArchetypeNodeBase::resizeTable>(
             data_id, {cur_task}, setup);
-
-        cur_task = builder.addNodeFn<&SortArchetypeNodeBase::clearWorldOffsetsAndCounts>(
-            data_id, {cur_task}, setup);
     }
 
     if (num_passes % 2 == 1) {
         cur_task = builder.addNodeFn<&SortArchetypeNodeBase::copyKeys>(
             data_id, {cur_task}, setup);
     }
-    
-    // Compute counts for each world by writing upper ranges to worldCounts
-    // and lower ranges to worldOffsets. 
-    cur_task = builder.addNodeFn<&SortArchetypeNodeBase::computeWorldCounts>(
+
+    // Compute the world sort offsets.
+    cur_task = builder.addNodeFn<&SortArchetypeNodeBase::computeWorldOffsets>(
         data_id, {cur_task}, setup, 0, 1);
 
-    // Compute final counts by subtracting worldOffsets from worldCounts
-    // Worlds with 0 entities have offset numEntities.
-    cur_task = builder.addNodeFn<&SortArchetypeNodeBase::correctWorldCounts>(
+    // Compute the world counts from the sort offsets.
+    cur_task = builder.addNodeFn<&SortArchetypeNodeBase::computeWorldCounts>(
         data_id, {cur_task}, setup, 0, 1);
 
     int32_t num_columns = state_mgr->getArchetypeNumColumns(archetype_id);

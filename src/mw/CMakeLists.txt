@@ -1,3 +1,5 @@
+add_subdirectory(render)
+
 add_library(madrona_mw_cpu STATIC
     ${MADRONA_INC_DIR}/mw_cpu.hpp ${MADRONA_INC_DIR}/mw_cpu.inl cpu_exec.cpp
 )
@@ -63,7 +65,8 @@ set(TASK_GRAPH_DEVICE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../physics/physics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../physics/narrowphase.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../physics/broadphase.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../render/ecs_system.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../viz/viewer_system.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/render/batch_renderer_system.cpp
 )
     
 set(JOB_SYS_INTERNAL_SRC_LIST)

@@ -1,4 +1,5 @@
 #include "memory.hpp"
+#include <vulkan/vulkan_core.h>
 
 #include "utils.hpp"
 #include "config.hpp"
@@ -210,26 +211,6 @@ LocalBuffer::~LocalBuffer()
     deleter_(buffer);
 }
 
-SparseBuffer::SparseBuffer(VkBuffer buf)
-    : buffer(buf)
-{}
-
-SparseBuffer::SparseBuffer(SparseBuffer &&o)
-    : buffer(o.buffer)
-{
-}
-
-SparseBuffer & SparseBuffer::operator=(SparseBuffer &&o)
-{
-    buffer = o.buffer;
-
-    return *this;
-}
-
-SparseBuffer::~SparseBuffer()
-{
-}
-
 LocalImage::LocalImage(uint32_t w,
                        uint32_t h,
                        uint32_t mip_levels,
@@ -294,8 +275,7 @@ static VkFormat chooseFormat(VkPhysicalDevice phy,
 static pair<VkBuffer, VkMemoryRequirements> makeUnboundBuffer(
     const Device &dev,
     VkDeviceSize num_bytes,
-    VkBufferUsageFlags usage,
-    bool is_sparse = false)
+    VkBufferUsageFlags usage)
 {
     VkBufferCreateInfo buffer_info;
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -306,10 +286,6 @@ static pair<VkBuffer, VkMemoryRequirements> makeUnboundBuffer(
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     buffer_info.pQueueFamilyIndices = nullptr;
     buffer_info.queueFamilyIndexCount = 0;
-
-    if (is_sparse) {
-        buffer_info.flags = VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
-    }
 
     VkBuffer buffer;
     REQ_VK(dev.dt.createBuffer(dev.hdl, &buffer_info, nullptr, &buffer));
@@ -326,7 +302,6 @@ static VkImage makeImage(const Device &dev,
                          uint32_t height,
                          uint32_t depth,
                          uint32_t mip_levels,
-                         uint32_t layers,
                          VkFormat format,
                          VkImageUsageFlags usage,
                          VkImageCreateFlags img_flags = 0)
@@ -347,7 +322,7 @@ static VkImage makeImage(const Device &dev,
     img_info.format = format;
     img_info.extent = {width, height, depth};
     img_info.mipLevels = mip_levels;
-    img_info.arrayLayers = layers;
+    img_info.arrayLayers = 1;
     img_info.samples = VK_SAMPLE_COUNT_1_BIT;
     img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
     img_info.usage = usage;
@@ -408,7 +383,7 @@ static MemoryTypeIndices findTypeIndices(const Device &dev,
                                       VkImageUsageFlags usage_flags,
                                       VkImageCreateFlags img_flags = 0) {
         VkImage test_image =
-            makeImage<2>(dev, 1, 1, 1, 1, 1, format, usage_flags, img_flags);
+            makeImage<2>(dev, 1, 1, 1, 1, format, usage_flags, img_flags);
 
         VkMemoryRequirements reqs = getImageMemReqs(dev, test_image);
 
@@ -619,21 +594,6 @@ HostBuffer MemoryAllocator::makeParamBuffer(VkDeviceSize num_bytes,
                                          dev_addr);
 }
 
-optional<SparseBuffer> MemoryAllocator::makeSparseBuffer(
-    VkDeviceSize num_bytes,
-    bool dev_addr)
-{
-    VkBufferUsageFlags usage = local_buffer_usage_flags_;
-
-    if (dev_addr) {
-        usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    }
-
-    auto [buffer, reqs] = makeUnboundBuffer(dev, num_bytes, usage, 1);
-
-    return SparseBuffer(buffer);
-}
-
 optional<LocalBuffer> MemoryAllocator::makeLocalBuffer(
     VkDeviceSize num_bytes,
     VkBufferUsageFlags usage,
@@ -804,7 +764,7 @@ pair<LocalTexture, TextureRequirements> MemoryAllocator::makeTexture(
     VkFormat fmt)
 {
     VkImage texture_img = makeImage<dims>(dev, width, height, depth,
-        mip_levels, 1, fmt, ImageFlags::textureUsage);
+        mip_levels, fmt, ImageFlags::textureUsage);
 
     auto reqs = getImageMemReqs(dev, texture_img);
 
@@ -847,10 +807,9 @@ optional<VkDeviceMemory> MemoryAllocator::alloc(VkDeviceSize num_bytes)
 
 LocalImage MemoryAllocator::makeColorAttachment(uint32_t width,
                                                 uint32_t height,
-                                                uint32_t layers,
                                                 VkFormat format)
 {
-    return makeDedicatedImage(width, height, 1, layers,
+    return makeDedicatedImage(width, height, 1,
                               format,
                               ImageFlags::colorAttachmentUsage,
                               type_indices_.local);
@@ -858,10 +817,9 @@ LocalImage MemoryAllocator::makeColorAttachment(uint32_t width,
 
 LocalImage MemoryAllocator::makeDepthAttachment(uint32_t width,
                                                 uint32_t height,
-                                                uint32_t layers,
                                                 VkFormat format)
 {
-    return makeDedicatedImage(width, height, 1, layers,
+    return makeDedicatedImage(width, height, 1,
                               format,
                               ImageFlags::depthAttachmentUsage,
                               type_indices_.local);
@@ -871,7 +829,7 @@ LocalImage MemoryAllocator::makeConversionImage(uint32_t width,
                                                 uint32_t height,
                                                 VkFormat fmt)
 {
-    return makeDedicatedImage(width, height, 1, 1,
+    return makeDedicatedImage(width, height, 1,
                               fmt,
                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -881,12 +839,11 @@ LocalImage MemoryAllocator::makeConversionImage(uint32_t width,
 LocalImage MemoryAllocator::makeDedicatedImage(uint32_t width,
                                                uint32_t height,
                                                uint32_t mip_levels,
-                                               uint32_t layers,
                                                VkFormat format,
                                                VkImageUsageFlags usage,
                                                uint32_t type_idx)
 {
-    auto img = makeImage<2>(dev, width, height, 1, mip_levels, layers, format, usage);
+    auto img = makeImage<2>(dev, width, height, 1, mip_levels, format, usage);
     auto reqs = getImageMemReqs(dev, img);
 
     VkMemoryDedicatedAllocateInfo dedicated;
@@ -912,12 +869,11 @@ LocalImage MemoryAllocator::makeDedicatedImage(uint32_t width,
                                                uint32_t height,
                                                uint32_t depth,
                                                uint32_t mip_levels,
-                                               uint32_t layers,
                                                VkFormat format,
                                                VkImageUsageFlags usage,
                                                uint32_t type_idx)
 {
-    auto img = makeImage<3>(dev, width, height, depth, mip_levels, layers, format, usage);
+    auto img = makeImage<3>(dev, width, height, depth, mip_levels, format, usage);
     auto reqs = getImageMemReqs(dev, img);
 
     VkMemoryDedicatedAllocateInfo dedicated;

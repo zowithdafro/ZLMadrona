@@ -38,9 +38,6 @@ namespace madrona::cu {
     case NVJITLINK_ERROR_INTERNAL: {
         err_str = "Internal error";
     } break;
-    default: {
-        err_str = "Unknown error";
-    } break;
     }
 
     fatal(file, line, funcname, "nvJitLink error: %s", err_str);

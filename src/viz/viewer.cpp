@@ -1,9 +1,7 @@
 #include <madrona/viz/viewer.hpp>
 #include <madrona/stack_alloc.hpp>
 #include <madrona/utils.hpp>
-#include <madrona/math.hpp>
 
-#include "viewer_common.hpp"
 #include "viewer_renderer.hpp"
 
 #include <imgui.h>
@@ -11,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
-#include <algorithm>
 
 using namespace std;
 
@@ -33,37 +30,43 @@ struct SceneProperties {
 };
 
 struct Viewer::Impl {
-    ViewerRenderer renderer;
-    ViewerControl vizCtrl;
-
+    ViewerCam cam;
+    Renderer::FrameConfig frameCfg;
+    Renderer renderer;
     uint32_t numWorlds;
     uint32_t maxNumAgents;
     int32_t simTickRate;
     float cameraMoveSpeed;
     bool shouldExit;
+    VoxelConfig voxelConfig;
 
-    inline Impl(const render::RenderManager &render_mgr,
-                const Window *window,
-                const Viewer::Config &cfg);
+    Impl(const Viewer::Config &cfg);
 
     inline void startFrame();
-
-    // This is going to render all the views which were registered
-    // by the ECS
-    inline void renderViews();
-
-    // This is going to render the viewer window itself (and support
-    // the fly camera)
     inline void render(float frame_duration);
 
     inline void loop(
-        void (*world_input_fn)(void *, CountT, const UserInput &),
-        void *world_input_data,
-        void (*agent_input_fn)(void *, CountT, CountT, const UserInput &),
-        void *agent_input_data,
-        void (*step_fn)(void *), void *step_data,
+        void (*input_fn)(void *, CountT, CountT, const UserInput &),
+        void *input_data, void (*step_fn)(void *), void *step_data,
         void (*ui_fn)(void *), void *ui_data);
 };
+
+CountT Viewer::loadObjects(Span<const imp::SourceObject> objs,
+                           Span<const imp::SourceMaterial> mats,
+                           Span<const imp::SourceTexture> textures)
+{
+    return impl_->renderer.loadObjects(objs, mats, textures);
+}
+
+void Viewer::configureLighting(Span<const LightConfig> lights)
+{
+    impl_->renderer.configureLighting(lights);
+}
+
+const VizECSBridge * Viewer::rendererBridge() const
+{
+    return impl_->renderer.getBridgePtr();
+}
 
 static void handleCamera(GLFWwindow *window,
                          ViewerCam &cam,
@@ -193,8 +196,98 @@ static int32_t numDigits(uint32_t x)
   return (x + table[idx]) >> 32;
 }
 
-static void flyCamUI(ViewerCam &cam)
+static void cfgUI(Renderer::FrameConfig &cfg,
+                  ViewerCam &cam,
+                  CountT num_agents,
+                  CountT num_worlds,
+                  int32_t *tick_rate)
 {
+    ImGui::Begin("Controls");
+
+    ImGui::TextUnformatted("Utilities");
+    bool requested_screenshot = ImGui::Button("Take Screenshot");
+    static char output_file_path[256] = "screenshot.bmp";
+    ImGui::InputText("Screenshot Output File (.bmp)", output_file_path, 256);
+
+    cfg.requestedScreenshot = requested_screenshot;
+    cfg.screenshotFilePath = output_file_path;
+
+    ImGui::TextUnformatted("Simulation Settings");
+    ImGui::Separator();
+
+    {
+        int world_idx = cfg.worldIDX;
+        float worldbox_width =
+            ImGui::CalcTextSize(" ").x * (max(numDigits(num_worlds) + 2, 7_i32));
+        if (num_worlds == 1) {
+            ImGui::BeginDisabled();
+        }
+        ImGui::PushItemWidth(worldbox_width);
+        ImGui::DragInt("Current World ID", &world_idx, 1.f, 0, num_worlds - 1,
+                       "%d", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::PopItemWidth();
+
+        if (num_worlds == 1) {
+            ImGui::EndDisabled();
+        }
+
+        cfg.worldIDX = world_idx;
+    }
+
+    ImGui::PushItemWidth(ImGui::CalcTextSize(" ").x * 7);
+    ImGui::DragInt("Tick Rate (Hz)", (int *)tick_rate, 5.f, 1, 1000);
+    if (*tick_rate < 1) {
+        *tick_rate = 1;
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::TextUnformatted("View Settings");
+    ImGui::Separator();
+    {
+        StackAlloc str_alloc;
+        const char **cam_opts = str_alloc.allocN<const char *>(num_agents + 1);
+        cam_opts[0] = "Free Camera";
+
+        ImVec2 combo_size = ImGui::CalcTextSize(" Free Camera ");
+
+        for (CountT i = 0; i < num_agents; i++) {
+            const char *agent_prefix = "Agent ";
+
+            CountT num_bytes = strlen(agent_prefix) + numDigits(i) + 1;
+            cam_opts[i + 1] = str_alloc.allocN<char>(num_bytes);
+            snprintf((char *)cam_opts[i + 1], num_bytes, "%s%u",
+                     agent_prefix, (uint32_t)i);
+        }
+
+        CountT cam_idx = cfg.viewIDX;
+        ImGui::PushItemWidth(combo_size.x * 1.25f);
+        if (ImGui::BeginCombo("Current View", cam_opts[cam_idx])) {
+            for (CountT i = 0; i < num_agents + 1; i++) {
+                const bool is_selected = (cam_idx == i);
+                if (ImGui::Selectable(cam_opts[i], is_selected)) {
+                    cam_idx = i;
+                }
+
+                if (is_selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+
+            ImGui::EndCombo();
+        }
+        ImGui::PopItemWidth();
+
+        cfg.viewIDX = cam_idx;
+    }
+
+    ImGui::Spacing();
+
+    ImGui::TextUnformatted("Free Camera Config");
+    ImGui::Separator();
+
+    if (cfg.viewIDX != 0) {
+        ImGui::BeginDisabled();
+    }
     auto side_size = ImGui::CalcTextSize(" Bottom " );
     side_size.y *= 1.4f;
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign,
@@ -266,212 +359,10 @@ static void flyCamUI(ViewerCam &cam)
         ImGui::DragFloat("View Size", &cam.orthoHeight,
                           0.5f, 0.f, 100.f, "%0.1f");
     }
-}
 
-static void cfgUI(ViewerControl &ctrl,
-                  CountT num_agents,
-                  CountT num_worlds,
-                  int32_t *tick_rate)
-{
-    ctrl.batchRenderOffsetY -=
-        ImGui::GetIO().MouseWheel * InternalConfig::secondsPerFrame * 120;
-    ctrl.batchRenderOffsetX -=
-        ImGui::GetIO().MouseWheelH * InternalConfig::secondsPerFrame * 120;
-
-    ImGui::Begin("Controls");
-
-    const char *viewer_type_ops[] = {
-        "Visualizer", "Batch Renderer"
-    };
-
-    ImGui::PushItemWidth(
-        ImGui::CalcTextSize(" ").x * (float)(strlen(viewer_type_ops[1]) + 3));
-    if (ImGui::BeginCombo("Viewer Mode",
-                          viewer_type_ops[(uint32_t)ctrl.viewerType])) {
-        for (uint32_t i = 0; i < 2; i++) {
-            const bool is_selected = (uint32_t)ctrl.viewerType == i;
-            if (ImGui::Selectable(viewer_type_ops[i], is_selected)) {
-                ctrl.viewerType = (ViewerType)i;
-            }
-
-            if (is_selected) {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-
-        ImGui::EndCombo();
-    }
-
-    ImGui::PopItemWidth();
-
-    {
-        int world_idx = ctrl.worldIdx;
-        float worldbox_width =
-            ImGui::CalcTextSize(" ").x * (max(numDigits(num_worlds) + 2, 7_i32));
-        if (num_worlds == 1) {
-            ImGui::BeginDisabled();
-        }
-        ImGui::PushItemWidth(worldbox_width);
-        ImGui::DragInt("Current World ID", &world_idx, 1.f, 0, num_worlds - 1,
-                       "%d", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::PopItemWidth();
-
-        if (num_worlds == 1) {
-            ImGui::EndDisabled();
-        }
-
-        ctrl.worldIdx = world_idx;
-    }
-
-    ImGui::Checkbox("Control Current View", &ctrl.linkViewControl);
-
-    {
-        StackAlloc str_alloc;
-        const char **cam_opts = str_alloc.allocN<const char *>(num_agents + 1);
-        cam_opts[0] = "Free Camera";
-
-        ImVec2 combo_size = ImGui::CalcTextSize(" Free Camera ");
-
-        for (CountT i = 0; i < num_agents; i++) {
-            const char *agent_prefix = "Agent ";
-
-            CountT num_bytes = strlen(agent_prefix) + numDigits(i) + 1;
-            cam_opts[i + 1] = str_alloc.allocN<char>(num_bytes);
-            snprintf((char *)cam_opts[i + 1], num_bytes, "%s%u",
-                     agent_prefix, (uint32_t)i);
-        }
-
-        ImGui::PushItemWidth(combo_size.x * 1.25f);
-        if (ImGui::BeginCombo("Current View", cam_opts[ctrl.viewIdx])) {
-            for (CountT i = 0; i < num_agents + 1; i++) {
-                const bool is_selected = ctrl.viewIdx == (uint32_t)i;
-                if (ImGui::Selectable(cam_opts[i], is_selected)) {
-                    ctrl.viewIdx = (uint32_t)i;
-                }
-
-                if (is_selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-
-            ImGui::EndCombo();
-        }
-        ImGui::PopItemWidth();
-
-        if (ctrl.linkViewControl) {
-            ctrl.controlIdx = ctrl.viewIdx;
-            ImGui::BeginDisabled();
-        }
-
-        ImGui::PushItemWidth(combo_size.x * 1.25f);
-        if (ImGui::BeginCombo("Input Control", cam_opts[ctrl.controlIdx])) {
-            for (CountT i = 0; i < num_agents + 1; i++) {
-                const bool is_selected = ctrl.controlIdx == (uint32_t)i;
-                if (ImGui::Selectable(cam_opts[i], is_selected)) {
-                    ctrl.controlIdx = (uint32_t)i;
-                }
-
-                if (is_selected) {
-                    ImGui::SetItemDefaultFocus();
-                }
-            }
-
-            ImGui::EndCombo();
-        }
-        ImGui::PopItemWidth();
-
-        if (ctrl.linkViewControl) {
-            ImGui::EndDisabled();
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Simulation Settings");
-    ImGui::Separator();
-
-#if 0
-    {
-        static bool override_sun_dir = false;
-        ImGui::Checkbox("Override Sun Direction", &override_sun_dir);
-
-        ctrl.overrideLightDir = override_sun_dir;
-
-        if (override_sun_dir) {
-            static float theta = 0.0f;
-            ImGui::SliderFloat("Theta", &theta, 0.0f, 360.0f);
-
-            static float phi = 0.0f;
-            ImGui::SliderFloat("Phi", &phi, 0.0f, 90.0f);
-
-            float x = std::cos(math::toRadians(theta)) * std::sin(math::toRadians(phi));
-            float y = std::sin(math::toRadians(theta)) * std::sin(math::toRadians(phi));
-            float z = std::cos(math::toRadians(phi));
-
-            math::Vector3 dir = {x, y, z};
-            cfg.newLightDir = dir;
-        }
-    }
-#endif
-
-    ImGui::PushItemWidth(ImGui::CalcTextSize(" ").x * 7);
-    ImGui::DragInt("Tick Rate (Hz)", (int *)tick_rate, 5.f, 1, 1000);
-    if (*tick_rate < 1) {
-        *tick_rate = 1;
-    }
-    ImGui::PopItemWidth();
-
-    ImGui::Spacing();
-
-    if (ctrl.viewIdx != 0 || ctrl.viewerType != ViewerType::Flycam) {
-        ImGui::BeginDisabled();
-    }
-
-    ImGui::TextUnformatted("Free Camera Config");
-    ImGui::Separator();
-
-    flyCamUI(ctrl.flyCam);
-
-    if (ctrl.viewIdx != 0 || ctrl.viewerType != ViewerType::Flycam) {
+    if (cfg.viewIDX != 0) {
         ImGui::EndDisabled();
     }
-
-    if (ctrl.viewerType != ViewerType::Grid) {
-        ImGui::BeginDisabled();
-    }
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Batch Renderer Visualization");
-    ImGui::Separator();
-
-    ImGui::PushItemWidth(ImGui::CalcTextSize(" ").x * 8.0f);
-
-    int grid_img_size = ctrl.gridImageSize;
-    ImGui::DragInt("View Width", &grid_img_size, 
-                   1.0f, 16, 1024, "%d", ImGuiSliderFlags_AlwaysClamp);
-    ctrl.gridImageSize = (uint32_t)grid_img_size;
-
-    int grid_width = ctrl.gridWidth;
-    ImGui::DragInt("Grid Width", &grid_width, 
-                   1.0f, 1, 1024, "%d", ImGuiSliderFlags_AlwaysClamp);
-    ctrl.gridWidth = grid_width;
-
-    ImGui::PopItemWidth();
-
-    ImGui::Checkbox("Render Depth", &ctrl.batchRenderShowDepth);
-
-    if (ctrl.viewerType != ViewerType::Grid) {
-        ImGui::EndDisabled();
-    }
-
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Utilities");
-    ImGui::Separator();
-    ctrl.requestedScreenshot = ImGui::Button("Take Screenshot");
-
-    ImGui::PushItemWidth(ImGui::CalcTextSize(" ").x * float(
-        strlen("Take Screenshot")) + 4.f);
-    ImGui::InputText("Output File (.bmp)", ctrl.screenshotFilePath, 256);
-    ImGui::PopItemWidth();
 
     ImGui::End();
 }
@@ -496,56 +387,51 @@ static void fpsCounterUI(float frame_duration)
 
 static ViewerCam initCam(math::Vector3 pos, math::Quat rot)
 {
-    math::Vector3 fwd = normalize(rot.rotateVec(math::fwd));
-    math::Vector3 up = normalize(rot.rotateVec(math::up));
-    math::Vector3 right = normalize(cross(fwd, up));
+    ViewerCam cam;
+    cam.position = pos;
+    cam.fwd = normalize(rot.rotateVec(math::fwd));
+    cam.up = normalize(rot.rotateVec(math::up));
+    cam.right = normalize(cross(cam.fwd, cam.up));
 
-    return ViewerCam {
-        .position = pos,
-        .fwd = fwd,
-        .up = up,
-        .right = right,
-    };
+    return cam;
 }
 
-Viewer::Impl::Impl(
-        const render::RenderManager &render_mgr,
-        const Window *window,
-        const Viewer::Config &cfg)
-    : renderer(render_mgr, window),
-      vizCtrl {
-          .worldIdx = 0,
-          .viewIdx = 0,
-          .controlIdx = 0,
-          .linkViewControl = true,
-          .flyCam = initCam(cfg.cameraPosition, cfg.cameraRotation),
-          .requestedScreenshot = false,
-          .screenshotFilePath = "screenshot.bmp",
-          .viewerType = ViewerType::Flycam,
-          .gridWidth = 10,
-          .gridImageSize = 256,
-          .batchRenderOffsetX = 0,
-          .batchRenderOffsetY = 0,
-          .batchRenderShowDepth = false,
+Viewer::Impl::Impl(const Config &cfg)
+    : cam(initCam(cfg.cameraPosition, cfg.cameraRotation)),
+      frameCfg{
+         .worldIDX = 0,
+         .viewIDX = 0,
       },
+      renderer(cfg.gpuID,
+               cfg.renderWidth,
+               cfg.renderHeight,
+               cfg.numWorlds,
+               cfg.maxViewsPerWorld,
+               cfg.maxInstancesPerWorld,
+               cfg.execMode == ExecMode::CUDA,
+               {cfg.xLength, cfg.yLength, cfg.zLength}),
       numWorlds(cfg.numWorlds),
-      maxNumAgents(
-          render_mgr.renderContext().engine_interop_.maxViewsPerWorld),
-      simTickRate(cfg.simTickRate),
+      maxNumAgents(cfg.maxViewsPerWorld),
+      simTickRate(cfg.defaultSimTickRate),
       cameraMoveSpeed(cfg.cameraMoveSpeed),
-      shouldExit(false)
+      shouldExit(false),
+      voxelConfig {
+         .xLength = cfg.xLength,
+         .yLength = cfg.yLength,
+         .zLength = cfg.zLength,
+      }
 {}
 
 void Viewer::Impl::render(float frame_duration)
 {
     // FIXME: pass actual active agents, not max
-    cfgUI(vizCtrl, maxNumAgents, numWorlds, &simTickRate);
+    cfgUI(frameCfg, cam, maxNumAgents, numWorlds, &simTickRate);
 
     fpsCounterUI(frame_duration);
 
     ImGui::Render();
 
-    renderer.render(vizCtrl);
+    renderer.render(cam, frameCfg);
 }
 
 Viewer::UserInput::UserInput(bool *keys_state, bool *press_state)
@@ -553,116 +439,106 @@ Viewer::UserInput::UserInput(bool *keys_state, bool *press_state)
 {}
 
 void Viewer::Impl::loop(
-    void (*world_input_fn)(void *, CountT, const UserInput &),
-    void *world_input_data,
-    void (*agent_input_fn)(void *, CountT, CountT, const UserInput &),
-    void *agent_input_data,
-    void (*step_fn)(void *), void *step_data,
+    void (*input_fn)(void *, CountT, CountT, const UserInput &),
+    void *input_data, void (*step_fn)(void *), void *step_data,
     void (*ui_fn)(void *), void *ui_data)
 {
-    GLFWwindow *window = renderer.osWindow();
+    GLFWwindow *window = renderer.window.platformWindow;
 
     std::array<bool, (uint32_t)KeyboardKey::NumKeys> key_state;
     std::array<bool, (uint32_t)KeyboardKey::NumKeys> press_state;
     std::array<bool, (uint32_t)KeyboardKey::NumKeys> prev_key_state;
+    utils::zeroN<bool>(key_state.data(), key_state.size());
     utils::zeroN<bool>(prev_key_state.data(), prev_key_state.size());
+    utils::zeroN<bool>(press_state.data(), press_state.size());
 
     float frame_duration = InternalConfig::secondsPerFrame;
     auto last_sim_tick_time = chrono::steady_clock::now();
     while (!glfwWindowShouldClose(window) && !shouldExit) {
-        utils::zeroN<bool>(key_state.data(), key_state.size());
-        utils::zeroN<bool>(press_state.data(), press_state.size());
-
-        key_state[(uint32_t)KeyboardKey::W] |=
-            (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::A] |=
-            (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::S] |=
-            (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::D] |=
-            (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::Q] |=
-            (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::E] |=
-            (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::X] |=
-            (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::X] |=
-            (!prev_key_state[(uint32_t)KeyboardKey::X]) &&
-            (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::M] |=
-            (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::M] |=
-            (!prev_key_state[(uint32_t)KeyboardKey::M]) &&
-            (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::Z] |=
-            (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::Z] |=
-            (!prev_key_state[(uint32_t)KeyboardKey::Z]) &&
-            (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::R] |=
-            (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::R] |=
-            (!prev_key_state[(uint32_t)KeyboardKey::R]) &&
-            (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::C] |=
-            (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::G] |=
-            (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::L] |=
-            (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::L] |=
-            (!prev_key_state[(uint32_t)KeyboardKey::L]) &&
-            (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::Space] |=
-            (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::T] |=
-            (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::F] |=
-            (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K1] |=
-            (glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS);
-        press_state[(uint32_t)KeyboardKey::K1] |=
-            !prev_key_state[(uint32_t)KeyboardKey::K1] &&
-            key_state[(uint32_t)KeyboardKey::K1];
-        key_state[(uint32_t)KeyboardKey::K2] |=
-            (glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K3] |=
-            (glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K4] |=
-            (glfwGetKey(window, GLFW_KEY_4) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K5] |=
-            (glfwGetKey(window, GLFW_KEY_5) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K6] |=
-            (glfwGetKey(window, GLFW_KEY_6) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K7] |=
-            (glfwGetKey(window, GLFW_KEY_7) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K8] |=
-            (glfwGetKey(window, GLFW_KEY_8) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::K9] |=
-            (glfwGetKey(window, GLFW_KEY_9) == GLFW_PRESS);
-        key_state[(uint32_t)KeyboardKey::Shift] |=
-            (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
-        
-        if (vizCtrl.controlIdx == 0) {
-            handleCamera(window, vizCtrl.flyCam, cameraMoveSpeed);
+        if (frameCfg.viewIDX != 0) {
+            key_state[(uint32_t)KeyboardKey::W] |=
+                    (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::A] |=
+                    (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::S] |=
+                    (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::D] |=
+                    (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::Q] |=
+                    (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::E] |=
+                    (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::R] |=
+                    (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
+            press_state[(uint32_t)KeyboardKey::R] |=
+                    (!prev_key_state[(uint32_t)KeyboardKey::R]) &&
+                    (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::X] |=
+                    (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS);
+            press_state[(uint32_t)KeyboardKey::X] |=
+                    (!prev_key_state[(uint32_t)KeyboardKey::X]) &&
+                    (glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::M] |=
+                    (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS);
+            press_state[(uint32_t)KeyboardKey::M] |=
+                    (!prev_key_state[(uint32_t)KeyboardKey::M]) &&
+                    (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::Z] |=
+                    (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS);
+            press_state[(uint32_t)KeyboardKey::Z] |=
+                    (!prev_key_state[(uint32_t)KeyboardKey::Z]) &&
+                    (glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::C] |=
+                    (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::G] |=
+                    (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::L] |=
+                    (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
+            press_state[(uint32_t)KeyboardKey::L] |=
+                    (!prev_key_state[(uint32_t)KeyboardKey::L]) &&
+                    (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::Space] |=
+                    (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::T] |=
+                    (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::F] |=
+                    (glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K1] |=
+                    (glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K2] |=
+                    (glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K3] |=
+                    (glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K4] |=
+                    (glfwGetKey(window, GLFW_KEY_4) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K5] |=
+                    (glfwGetKey(window, GLFW_KEY_5) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K6] |=
+                    (glfwGetKey(window, GLFW_KEY_6) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K7] |=
+                    (glfwGetKey(window, GLFW_KEY_7) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K8] |=
+                    (glfwGetKey(window, GLFW_KEY_8) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::K9] |=
+                    (glfwGetKey(window, GLFW_KEY_9) == GLFW_PRESS);
+            key_state[(uint32_t)KeyboardKey::Shift] |=
+                    (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
+        } else {
+            handleCamera(window, cam, cameraMoveSpeed);
         }
 
         auto cur_frame_start_time = chrono::steady_clock::now();
 
         auto sim_delta_t = chrono::duration<float>(1.f / (float)simTickRate);
 
-        startFrame();
-
         if (cur_frame_start_time - last_sim_tick_time >= sim_delta_t) {
-            prev_key_state = key_state;
-            UserInput user_input(key_state.data(), press_state.data());
-
-            world_input_fn(world_input_data, vizCtrl.worldIdx, user_input);
-
-            if (vizCtrl.controlIdx != 0) {
-                agent_input_fn(agent_input_data, vizCtrl.worldIdx,
-                         vizCtrl.controlIdx - 1, user_input);
+            if (frameCfg.viewIDX != 0) {
+                prev_key_state = key_state;
+                UserInput user_input(key_state.data(),press_state.data());
+                input_fn(input_data, frameCfg.worldIDX,
+                         frameCfg.viewIDX - 1, user_input);
+                utils::zeroN<bool>(key_state.data(), key_state.size());
+                utils::zeroN<bool>(press_state.data(), press_state.size());
             }
 
             step_fn(step_data);
@@ -670,8 +546,9 @@ void Viewer::Impl::loop(
             last_sim_tick_time = cur_frame_start_time;
         }
 
-        ui_fn(ui_data);
+        startFrame();
 
+        ui_fn(ui_data);
         render(frame_duration);
 
         frame_duration = throttleFPS(cur_frame_start_time);
@@ -680,58 +557,31 @@ void Viewer::Impl::loop(
     renderer.waitForIdle();
 }
 
-Viewer::Viewer(const render::RenderManager &render_mgr,
-               const Window *window,
-               const Config &cfg)
-    : impl_(new Impl(render_mgr, window, cfg))
+Viewer::Viewer(const Config &cfg)
+    : impl_(new Impl(cfg))
 {}
 
 Viewer::Viewer(Viewer &&o) = default;
 Viewer::~Viewer() = default;
 
-CountT Viewer::loadObjects(Span<const imp::SourceObject> objs,
-                           Span<const imp::SourceMaterial> mats,
-                           Span<const imp::SourceTexture> textures)
+void Viewer::loop(void (*input_fn)(void *, CountT, CountT, const UserInput &),
+                  void *input_data, void (*step_fn)(void *), void *step_data,
+                  void (*ui_fn)(void *), void *ui_data)
 {
-    return impl_->renderer.loadObjects(objs, mats, textures);
+    impl_->loop(input_fn, input_data, step_fn, step_data, ui_fn, ui_data);
 }
 
-void Viewer::configureLighting(Span<const render::LightConfig> lights)
-{
-    impl_->renderer.configureLighting(lights);
+CountT Viewer::getRenderedWorldID() {
+    return (CountT)impl_->frameCfg.worldIDX;
 }
 
-void Viewer::loop(
-    void (*world_input_fn)(void *, CountT, const UserInput &),
-    void *world_input_data,
-    void (*agent_input_fn)(void *, CountT, CountT, const UserInput &),
-    void *agent_input_data,
-    void (*step_fn)(void *), void *step_data,
-    void (*ui_fn)(void *), void *ui_data)
-{
-    impl_->loop(world_input_fn, world_input_data,
-                agent_input_fn, agent_input_data,
-                step_fn, step_data, ui_fn, ui_data);
+CountT Viewer::getRenderedViewID() {
+    return (CountT)impl_->frameCfg.viewIDX;
 }
 
 void Viewer::stopLoop()
 {
     impl_->shouldExit = true;
-}
-
-CountT Viewer::getCurrentWorldID() const
-{
-    return (CountT)impl_->vizCtrl.worldIdx;
-}
-
-CountT Viewer::getCurrentViewID() const
-{
-    return (CountT)impl_->vizCtrl.viewIdx - 1;
-}
-
-CountT Viewer::getCurrentControlID() const
-{
-    return (CountT)impl_->vizCtrl.viewIdx - 1;
 }
 
 }

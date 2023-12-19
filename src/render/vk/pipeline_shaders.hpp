@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vulkan/vulkan_core.h>
+
 #include <madrona/math.hpp>
 #include <madrona/span.hpp>
 #include <madrona/stack_alloc.hpp>
@@ -40,8 +42,7 @@ public:
     PipelineShaders(const Device &dev,
                     StackAlloc &tmp_alloc,
                     Span<const SPIRVShader> shaders,
-                    Span<const BindingOverride> binding_overrides,
-                    VkShaderStageFlags extra_stages = 0);
+                    Span<const BindingOverride> binding_overrides);
     PipelineShaders(const PipelineShaders &) = delete;
     PipelineShaders(PipelineShaders &&) = default;
     ~PipelineShaders();
@@ -54,11 +55,6 @@ public:
     inline VkDescriptorSetLayout getLayout(uint32_t idx) const
     {
         return layouts_[idx];
-    }
-
-    inline uint32_t getLayoutCount() const
-    {
-        return layouts_.size();
     }
 
     VkDescriptorPool makePool(uint32_t set_id, uint32_t max_sets) const;

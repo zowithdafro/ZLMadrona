@@ -168,10 +168,8 @@ private:
 // #ifdef LIMIT_ACTIVE_BLOCKS
 //     AtomicU32 block_sm_offsets_[MADRONA_MWGPU_NUM_MEGAKERNEL_NUM_SMS];
 // #endif
-    FixedInlineArray<
-            cuda::barrier<cuda::thread_scope_device>,
-            MADRONA_MWGPU_MAX_BLOCKS_PER_SM
-        > init_barriers_;
+    FixedInlineArray<cuda::barrier<cuda::thread_scope_device>,
+                     consts::maxMegakernelBlocksPerSM> init_barriers_;
 
 friend class Builder;
 };
@@ -307,11 +305,8 @@ struct SortArchetypeNodeBase : NodeBase {
     void binScan(int32_t invocation_idx);
     void resizeTable(int32_t);
     void copyKeys(int32_t invocation_idx);
+    void computeWorldOffsets(int32_t invocation_idx);
     void computeWorldCounts(int32_t invocation_idx);
-    void correctWorldCounts(int32_t invocation_idx);
-    void clearWorldOffsetsAndCounts(int32_t invocation_idx);
-    void worldCountScan(int32_t invocation_idx);
-
 
     static TaskGraph::NodeID addToGraph(
         TaskGraph::Builder &builder,
